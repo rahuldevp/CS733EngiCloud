@@ -1,8 +1,0 @@
-CURRENT ASSIGNMENT : Leader election for RAFT (Servers should be running in isolation with 1 leader, withstanding any network delay or other issues)
-
-Work Done: Basic functionality for leader election is added. Leader is elected once through getting votes through RPC. 
-
-To Do: Complete the leader election process and do log replication.
-
-Work Completion Date: I will complete all the mentioned tasks in To Do by 
-**************** March 29, 2015 *****************

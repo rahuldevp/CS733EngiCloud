@@ -13,7 +13,7 @@ For more on RAFT refer to the [link] (raftuserstudy.s3-website-us-west-1.amazona
 ### Checkout Project and Directory Structure
 
 For checkout use following command:
-<code>go get</code> github.com/rahuldevp/cs733/assignment3
+<code>go get</code> github.com/rahuldevp/CS733EngiCloud/assignment3
 
 Below is the directory structure for project:
 

@@ -8,6 +8,7 @@ import(
 	"fmt"
 	"time"
 	"sort"
+	"os"
 	"math/rand"
 )
 
@@ -25,6 +26,8 @@ type ErrRedirect int // See Log.Append. Implements Error interface.
 
 //defining the mutex to be used for RW operation for multiple clients
 var mutex = &sync.RWMutex{}
+
+var name string
 
 const ( 
 	MajorityCount = 3 
@@ -112,6 +115,7 @@ type Raft struct {
 	State string
 	ElectionTimeoutInterval time.Duration
 
+	f *os.File
 	//array of log entries maintained by each server
 	Log []LogEntity
 	VotingCh chan VotingStruct
@@ -137,31 +141,33 @@ type Raft struct {
 // When the process starts, the local disk log is read and all committed
 // entries are recovered and replayed
 func NewRaft(config *ClusterConfig, thisServerId int) (*Raft, error) {
-	
 	var raft Raft
+	name="/tmp/dat"+strconv.Itoa(thisServerId)
+	raft.f , _ = os.Create(name)
 	raft.Clusterconfig = *config
-	raft.CommitCh = make(chan LogEntity,1000)
+	raft.CommitCh = make(chan LogEntity,1024)
 	raft.ServerId = thisServerId
 	raft.State = Follower
 	raft.ElectionTimeoutInterval = (300 * time.Millisecond) + (time.Duration(thisServerId) * 300 * time.Millisecond)
-	raft.VotingCh = make(chan VotingStruct,1000)
-	raft.ReplyVotingCh = make(chan VotingStructReply,1000)
-	raft.AppendLogCh = make(chan AppendLogEntry,1000)
-	raft.ReplyAppendLogCh = make(chan AppendLogEntryReply,1000)
+	raft.VotingCh = make(chan VotingStruct,1024)
+	raft.ReplyVotingCh = make(chan VotingStructReply,1024)
+	raft.AppendLogCh = make(chan AppendLogEntry,1024)
+	raft.ReplyAppendLogCh = make(chan AppendLogEntryReply,1024)
 	raft.VotedForServer = -1
 	raft.CurrentTerm = 0
 	raft.CommitIndex = 0
 	raft.LastApplied = 0
 	raft.Leader = -1
 	
-	for k:=1; k<=100; k++ {
+	/*for k:=1; k<=100; k++ {
 		raft.Log = append(raft.Log, LogEntity{k,-9,[]byte{'a','b','c'},true})
-	}
+	}*/
+	raft.Log = make([]LogEntity,0)
 
 	raft.NextIndex = make([]int, 5)
 	raft.MatchIndex = make([]int, 5)
 
-	raft.ClientToLeader = make(chan []byte,1024)
+	raft.ClientToLeader = make(chan []byte,2048)
 	return &raft, nil
 }
 
@@ -232,16 +238,19 @@ func FollowerLoop(raft *Raft) {
 			           raft.ReplyAppendLogCh<-AppendLogEntryReply {raft.CurrentTerm,false,false}
 			        } else {
 			        	//fmt.Println("*******************************************************")
-			        	fmt.Println(raft.ServerId,"-----",appendLogEvent.LogEntries[0].LogIndex,"------",appendLogEvent.LogEntries[0].Data)
+			        	raft.CommitIndex = appendLogEvent.LastCommitIndex
+			        	//fmt.Println(raft.ServerId,"+++",appendLogEvent.LogEntries[0].LogIndex,"+++",string(appendLogEvent.LogEntries[0].Data))
 			            raft.Log[appendLogEvent.PreviousLogIndex]=appendLogEvent.LogEntries[0]
 			            raft.ReplyAppendLogCh<-AppendLogEntryReply {raft.CurrentTerm,true,false}
 			        }
 			    } else if receiverLastLogIndex == appendLogEvent.PreviousLogIndex {
-			        if receiverLastLogIndex!=0 && raft.Log[receiverLastLogIndex].Term !=  appendLogEvent.PreviousLogTerm{
+			    	//fmt.Println(raft.ServerId,"****",receiverLastLogIndex,"*****",appendLogEvent.PreviousLogTerm)
+			        if receiverLastLogIndex!=0 && raft.Log[receiverLastLogIndex-1].Term !=  appendLogEvent.PreviousLogTerm{
 			           raft.ReplyAppendLogCh<-AppendLogEntryReply {raft.CurrentTerm,false,false}
 			        } else {
 			        	//fmt.Println("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
-			        	fmt.Println(raft.ServerId,"-----",appendLogEvent.LogEntries[0].LogIndex,"------",appendLogEvent.LogEntries[0].Data)
+			        	raft.CommitIndex = appendLogEvent.LastCommitIndex
+			        	//fmt.Println(raft.ServerId,"-----",appendLogEvent.LogEntries[0].LogIndex,"----",string(appendLogEvent.LogEntries[0].Data))
 			            raft.Log=append(raft.Log,appendLogEvent.LogEntries[0])
 			            raft.ReplyAppendLogCh<-AppendLogEntryReply {raft.CurrentTerm,true,false}
 			        }
@@ -250,7 +259,12 @@ func FollowerLoop(raft *Raft) {
     		timer.Reset(raft.ElectionTimeoutInterval)
        	case "VoteRequest":
             receiverLastLogIndex := len(raft.Log)
-            receiverLastLogTerm := raft.Log[receiverLastLogIndex-1].Term
+            var receiverLastLogTerm int 
+            if len(raft.Log) == 0 {
+            	receiverLastLogTerm = 0
+            } else {
+            	receiverLastLogTerm = raft.Log[receiverLastLogIndex-1].Term
+            }
        		if votingEvent.Term > raft.CurrentTerm {
             	raft.CurrentTerm = votingEvent.Term
             }
@@ -303,6 +317,7 @@ func CandidateLoop(raft *Raft) {
         		if appendLogEvent.Term < raft.CurrentTerm {
 	        		raft.ReplyAppendLogCh<-AppendLogEntryReply {raft.CurrentTerm,false,true}
 	        	} else if appendLogEvent.Term >= raft.CurrentTerm {
+	        		raft.CommitIndex = appendLogEvent.LastCommitIndex
 	        		raft.ReplyAppendLogCh<-AppendLogEntryReply {raft.CurrentTerm,false,true}
 	        		raft.CurrentTerm = appendLogEvent.Term
 	        		raft.Leader = appendLogEvent.LeaderID
@@ -314,6 +329,7 @@ func CandidateLoop(raft *Raft) {
         		if appendLogEvent.Term < raft.CurrentTerm {
 	        		raft.ReplyAppendLogCh<-AppendLogEntryReply {raft.CurrentTerm,false,false}
 	        	} else if appendLogEvent.Term >= raft.CurrentTerm {
+	        		raft.CommitIndex = appendLogEvent.LastCommitIndex
 	        		raft.ReplyAppendLogCh<-AppendLogEntryReply {raft.CurrentTerm,false,false}
 	        		raft.CurrentTerm = appendLogEvent.Term
 	        		raft.Leader = appendLogEvent.LeaderID
@@ -325,7 +341,12 @@ func CandidateLoop(raft *Raft) {
         	
        	case "VoteRequest":
        		receiverLastLogIndex := len(raft.Log)
-            receiverLastLogTerm := raft.Log[receiverLastLogIndex-1].Term
+       		var receiverLastLogTerm int
+       		if receiverLastLogIndex > 0 {
+       			receiverLastLogTerm = raft.Log[receiverLastLogIndex-1].Term	
+       		} else {
+       			receiverLastLogTerm = 0
+       		}
        		if votingEvent.Term > raft.CurrentTerm {
             	raft.CurrentTerm = votingEvent.Term
             }
@@ -374,16 +395,15 @@ var data []byte
 func LeaderLoop(raft *Raft) {
 	HBtimer.Reset(HeartBeatInterval)
 	fmt.Println("I am a Leader-----", raft.ServerId, "--", raft.CurrentTerm)
-	/*for kk:=0; kk<5; kk++ {
-		raft.NextIndex[kk] = raft.CommitIndex
-	}*/
+	for kk:=0; kk<5; kk++ {
+		raft.NextIndex[kk] = len(raft.Log)
+	}
 	var request string
     var votingEvent VotingStruct
     var appendLogEvent AppendLogEntry
-    var randNum int
     ThisLoop:
 	for raft.State == Leader {
-		randNum = rand.Intn(100)
+		randNum := rand.Intn(100)
 		if randNum > 97 {
 			raft.State = Follower
 			break ThisLoop
@@ -437,15 +457,32 @@ func LeaderLoop(raft *Raft) {
 				var tempLog []LogEntity
 				cc := raft.Clusterconfig
 				for _,value := range cc.Servers {
-					appendStruct := AppendLogEntry{
-					raft.CurrentTerm,
-					raft.ServerId,
-					len(raft.Log)-1,
-					raft.Log[len(raft.Log)-1].Term,
-					raft.CommitIndex,
-					append(tempLog,raft.Log[raft.NextIndex[value.Id]]),
-					}
+					//fmt.Println("$$$$$$$$$$$$",len(raft.Log),"$$$$$$$$$",raft.NextIndex[value.Id],"$$$$$$",value.Id) 
 					if(value.Id != raft.ServerId) {
+						var previousLogIndex int 
+						var previousLogTerm int
+						if len(raft.Log) == 0 {
+							previousLogIndex = 0
+							previousLogTerm = 0
+						} else {
+							previousLogIndex = len(raft.Log)-1
+							previousLogTerm = raft.Log[len(raft.Log)-1].Term
+							if len(raft.Log) == 1 && raft.NextIndex[value.Id] == 0 {
+								raft.NextIndex[value.Id]++
+							}
+							if len(raft.Log) >= raft.NextIndex[value.Id] && len(raft.Log) > 0 {
+								fmt.Println("Line 473:",raft.ServerId,"---",value.Id,"--",len(raft.Log), "--",raft.NextIndex[value.Id])
+								tempLog = append(tempLog, raft.Log[raft.NextIndex[value.Id]-1])	
+							}
+						}
+						appendStruct := AppendLogEntry{
+						raft.CurrentTerm,
+						raft.ServerId,
+						previousLogIndex,
+						previousLogTerm,
+						raft.CommitIndex,
+						tempLog,
+						}
 						go sendAppendRPC(appendStruct, value, raft)
 					}
 					tempLog = nil
@@ -453,23 +490,29 @@ func LeaderLoop(raft *Raft) {
 				HBtimer.Reset(HeartBeatInterval)
     		case <-time.After(5*time.Millisecond):
     	}
-    	
+    	//fmt.Println(".................................................")
     	select
     	{
     		case data=<-raft.ClientToLeader:
-    			tempLogEntity := LogEntity{len(raft.Log), raft.CurrentTerm, data, false}
+    			fmt.Println("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+    			tempLogEntity := LogEntity{len(raft.Log)+1, raft.CurrentTerm, data, false}
     			raft.Log = append(raft.Log, tempLogEntity)
-    		case <-time.After(5*time.Millisecond):
+    		case <-time.After(10*time.Millisecond):
     	}
-    	setCommitIndex(raft,data)
+    	go setCommitIndex(raft,data)
+    	//data = nil
 	}
 }
 
 func setCommitIndex(raft *Raft, data []byte) {
 	vals := raft.MatchIndex
 	sort.Ints(vals)
-	if vals[3] > raft.CommitIndex && raft.Log[vals[3]].Term == raft.CurrentTerm {
+	//fmt.Println("#########################",raft.CommitIndex,"##########################",vals[3])
+	if vals[3] > raft.CommitIndex {
+		//fmt.Println(data)
+		fmt.Println("@@@@@@@@@@@@@@@@@@@@@@@@@@",raft.CommitIndex,"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",vals[3])
 		raft.CommitIndex = vals[3]
+		_,_=raft.f.Write(data)
 		raft.CommitCh<-LogEntity{raft.CommitIndex, raft.CurrentTerm, data, true}
 	}
 } 
@@ -494,7 +537,31 @@ func sendAppendRPC(appendLogEntry AppendLogEntry, value ServerConfig, raft *Raft
 
 	if err != nil {
 		log.Print("Remote Method Invocation Error:", err)
+	} 
+
+	//fmt.Println(reply.IsHB, reply.IsCommited, len(raft.Log), raft.NextIndex[value.Id])
+
+	if reply.IsHB == true {
+
 	} else {
+		if reply.IsCommited == false {
+			if raft.NextIndex[value.Id] > 1 {
+				mutex.Lock()
+				raft.NextIndex[value.Id]--
+				mutex.Unlock()
+			}
+		} else if reply.IsCommited == true {
+			if len(raft.Log) >= raft.NextIndex[value.Id] {
+				//fmt.Println("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
+				mutex.Lock()
+				raft.MatchIndex[value.Id]=raft.NextIndex[value.Id]
+				raft.NextIndex[value.Id]++
+				mutex.Unlock()	
+			}
+		}
+	} 
+
+	/*else {
 		if reply.Term > raft.CurrentTerm {
 			raft.State = Follower
 		} else if reply.IsCommited == false && reply.IsHB == false {
@@ -512,7 +579,8 @@ func sendAppendRPC(appendLogEntry AppendLogEntry, value ServerConfig, raft *Raft
 				raft.MatchIndex[value.Id]=raft.NextIndex[value.Id]	
 			}
 		}
-	}
+	}*/
+
 }
 
 func sendVoteRPC(votingStruct VotingStruct, value ServerConfig, raft *Raft) {

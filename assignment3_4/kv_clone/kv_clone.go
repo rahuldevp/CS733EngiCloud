@@ -12,7 +12,7 @@ import (
     "encoding/json"
     "io/ioutil"
     "os"
-    //"fmt"
+    "fmt"
 )
 
 //details of the leader hardcoded for time being
@@ -134,7 +134,7 @@ func spawnServers(cc raft.ClusterConfig,sc raft.ServerConfig) {
 func listenForClients(cc raft.ClusterConfig,sc raft.ServerConfig,port string){
     l, err:= net.Listen(CONN_TYPE,sc.Host+":"+port)
 
-    //fmt.Println("Listening clients on:",sc.Host+":"+port)
+    fmt.Println("Listening clients on:",sc.Host+":"+port)
 
     if err != nil {
         log.Print("Error listening:", err.Error())
@@ -145,14 +145,16 @@ func listenForClients(cc raft.ClusterConfig,sc raft.ServerConfig,port string){
     //creating new raft object
     raft_obj,_=raft.NewRaft(&cc,sc.Id)
 
-    raft.Loop(raft_obj)
-
+    //wg.Add(1)
+    go raft.Loop(raft_obj)
+    //defer wg.Done()
     for {
           // Listen for an incoming connection.
           conn, err := l.Accept()
           if err != nil {
               log.Print("Error accepting Connection Requests: ", err.Error())
           }        
+          // fmt.Println("Here----------------")
           // Handle connections in a new goroutine for the leader
           go handleRequest(conn)
         }
@@ -164,7 +166,7 @@ func listenForServers(sc raft.ServerConfig,port string) {
 
     l, err:= net.Listen(CONN_TYPE,sc.Host+":"+port)
 
-    //fmt.Println("Listening servers on:",sc.Host+":"+port)
+    fmt.Println("Listening servers on:",sc.Host+":"+port)
 
     if err != nil {
         log.Print("Error listening:", err.Error())
@@ -186,18 +188,21 @@ func listenForServers(sc raft.ServerConfig,port string) {
 // Handles incoming requests from clients only
 func handleRequest(conn net.Conn) {
 
-  //fmt.Println("Handling connection for:",conn.RemoteAddr())
-  
+  fmt.Println("Handling client requests for:",conn.RemoteAddr())
   // Close the connection when you're done with it.
   defer conn.Close()
   
   for {
       // Make a buffer to hold incoming data.
-      buf := make([]byte, 1024)
+      buf := make([]byte, 2048)
       // Read the incoming connection into the buffer.
+
       size, err := conn.Read(buf)
     
     if size > 0 {
+      if (raft_obj.State != "Leader") {
+        conn.Write([]byte("900"+strconv.Itoa(raft_obj.ServerId)))
+      }
 
       if err != nil {
         log.Print("Error reading:", err.Error())
@@ -205,9 +210,16 @@ func handleRequest(conn net.Conn) {
 
       buf= buf[:size]
 
+      //calling the append function for sending the append entries rpc
+      fmt.Println(string(buf))
       raft_obj.ClientToLeader<-buf
       
-      <-raft_obj.CommitCh
+      fmt.Println("/////////////////////////////////////////////////////////////////////////////////")
+
+      logentry:=<-raft_obj.CommitCh
+      //time.Sleep(1000*time.Millisecond)
+      fmt.Println(":::::::::::",logentry.LogIndex, logentry.Term)
+
       //fmt.Println("Now proceeding with the command processing")
 
       commands := string(buf)
@@ -232,28 +244,28 @@ func handleRequest(conn net.Conn) {
       //the first element of the array will always be the command name
       var noReply bool= false
       
-      if(arrayOfCommands[0]=="set") {
-            set(conn,newArrayOfCommands[1:],&noReply)
+          if(arrayOfCommands[0]=="set") {
+                set(conn,newArrayOfCommands[1:],&noReply)
+                raft_obj.LastApplied=logentry.LogIndex
+            } else if(arrayOfCommands[0]=="cas") {
+                cas(conn,newArrayOfCommands[1:],&noReply)
+                raft_obj.LastApplied=logentry.LogIndex
+            } else if(arrayOfCommands[0]=="get") {
+                get(conn,newArrayOfCommands[1:])
+            } else if(arrayOfCommands[0]=="getm") {
+                getm(conn,newArrayOfCommands[1:]) 
+            } else if(arrayOfCommands[0]=="delete") {
+                deleteEntry(conn,newArrayOfCommands[1:]) 
+                raft_obj.LastApplied=logentry.LogIndex
+            } else {
+                conn.Write([]byte("ERRCMDERR\r\n"))
+            }
 
-        } else if(arrayOfCommands[0]=="cas") {
-            cas(conn,newArrayOfCommands[1:],&noReply)
-
-        } else if(arrayOfCommands[0]=="get") {
-            get(conn,newArrayOfCommands[1:])
-
-        } else if(arrayOfCommands[0]=="getm") {
-            getm(conn,newArrayOfCommands[1:]) 
-
-        } else if(arrayOfCommands[0]=="delete") {
-            deleteEntry(conn,newArrayOfCommands[1:]) 
-
-        } else {
-            conn.Write([]byte("ERRCMDERR\r\n"))
-        }
       } else {
-          //fmt.Println("Reading EOF from conn")
+          break  //the infinite for loop
       }
-    }  
+
+    }
 }
 
 //sets the new key in the map
@@ -287,6 +299,7 @@ func set(conn net.Conn,commands []string,noReply *bool) {
         
       if(!(*noReply)) {
           conn.Write([]byte("OK "+strconv.FormatInt(unique_version,10)+"\r\n"))
+          fmt.Println("----1")
           *noReply=false
       }
 }
@@ -332,6 +345,7 @@ func cas(conn net.Conn,commands []string,noReply *bool){
           mutex.Unlock()
 
           conn.Write([]byte("OK "+strconv.FormatInt(unique_version,10)+"\r\n"))
+          fmt.Println("----2")
           *noReply=false
       }
 }
@@ -350,6 +364,7 @@ func get(conn net.Conn,commands []string) {
       conn.Write([]byte("ERRNOTFOUND\r\n"))
     } else {
       conn.Write([]byte("VALUE "+strconv.FormatInt(m_instance.numbytes,10) +" "+m_instance.value+"\r\n"))
+      fmt.Println("----3")
     }
 }
 
@@ -367,6 +382,7 @@ func getm(conn net.Conn,commands []string){
     } else {
       conn.Write([]byte("VALUE "+strconv.FormatInt(m_instance.version,10)+" "+strconv.FormatInt(m_instance.exptime,10)+" "+
         strconv.FormatInt(m_instance.numbytes,10) +" "+m_instance.value+"\r\n"))
+      fmt.Println("----4")
     }
 }
 
@@ -383,6 +399,7 @@ func deleteEntry(conn net.Conn,commands []string) {
     } else {
           delete(store,key)
           conn.Write([]byte("DELETED\r\n"))
+          fmt.Println("----5")
     }
   mutex.Unlock()
 }

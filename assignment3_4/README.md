@@ -21,7 +21,7 @@ Below is the directory structure for project:
   * kv_clone.go: This file contains the server side code. Server listens for both clients and servers on client port and log port respectively. After receiving the majority server pushes the changes on persistent log.
   * kv_clone_test.go: Contains all the test cases including commands which are fired concurrently evaluating all the necessary scenarios.
 2. <b>raft:</b>
-  * raft.go: This file has code for Raft object which is used by each server to initialize itself. It also contains code for method <code>Append()</code> which appends the log and invokes the sendRPC method th send the log to other servers.
+  * raft.go: This file has code for Raft object which is used by each server to initialize itself. It also contains code for method <code>Append()</code> which appends the log and invokes the sendRPC method to send the log to other servers.
 3. <b>server-spawner:</b>
   * server-spawner.go: For spawning multiple servers.
 4. <b>server.json:</b> This file contains the configuration details with which the project will start. Below are some configurable parameters
@@ -39,5 +39,5 @@ Below is the directory structure for project:
  <br/><code>go test </code>
 
 ### Todo
-1. ~~Project when run with multiple concurrent client configuration sometimes goes in a deadlock. So need to work on it.~~
-2. Completing the remaining specifications which are part of the RAFT protocol
+1. To complete the log replication in case of leader change.
+2. To handle multiple clients when leader changes.
